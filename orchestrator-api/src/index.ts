@@ -57,9 +57,14 @@ async function processPreview(previewId: string, prompt: string) {
         });
 
     } catch (error) {
+        // ENHANCED ERROR LOGGING - ONLY THIS BLOCK WAS MODIFIED
+        console.error(`[${previewId}] CRITICAL ERROR in processPreview:`, error);
+        const errorMessage = error instanceof Error ? error.message : String(error);
+        
         await db.previews.update(previewId, {
             status: 'failed',
-            error: error.message
+            error: errorMessage,
+            updatedAt: new Date()
         });
     }
 }
