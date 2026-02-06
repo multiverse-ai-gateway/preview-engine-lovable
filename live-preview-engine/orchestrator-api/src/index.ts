@@ -2,100 +2,88 @@ import express from 'express';
 import cors from 'cors';
 import dotenv from 'dotenv';
 import { db } from './db';
-import { deployToNetlify } from './services/netlify';
-import { generateAppCode } from './services/generator';
+import { previewQueue } from './services/queue';
 
 dotenv.config();
 const app = express();
 app.use(cors());
 app.use(express.json());
 
-// Root route redirects to health check
+// FIX: Root endpoint that definitely works
 app.get('/', (req, res) => {
-    res.redirect('/api/preview/health');
+  res.json({ 
+    status: 'live', 
+    service: 'Preview Engine API',
+    message: 'Service is running with queue system',
+    timestamp: new Date().toISOString()
+  });
 });
 
-// Health check endpoint
-app.get('/api/preview/health', (req, res) => {
-    res.json({ status: 'ok', message: 'Preview Orchestrator API is running' });
+// FIX: Simple health check that can't fail
+app.get('/health', (req, res) => {
+  res.json({ 
+    status: 'healthy', 
+    timestamp: new Date().toISOString(),
+    redis: previewQueue.client.status,
+    queue: 'active'
+  });
 });
 
-// Create a new preview
+// FIX: Queue stats
+app.get('/api/queue/stats', async (req, res) => {
+  try {
+    const counts = await previewQueue.getJobCounts();
+    res.json({ success: true, counts, redis: previewQueue.client.status });
+  } catch (err) {
+    res.json({ success: false, error: 'Queue not ready yet' });
+  }
+});
+
+// FIX: Create preview endpoint
 app.post('/api/preview', async (req, res) => {
-    try {
-        const { prompt, userId } = req.body;
-        const previewId = `preview_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+  try {
+    const { prompt, userId } = req.body;
+    const jobId = `preview_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
 
-        await db.previews.add({
-            id: previewId,
-            prompt,
-            userId: userId || 'anonymous',
-            status: 'building',
-            liveUrl: null,
-            error: null,
-            createdAt: new Date(),
-            updatedAt: new Date()
-        });
+    await db.previews.add({
+      id: jobId,
+      prompt,
+      userId: userId || 'anonymous',
+      status: 'building',
+      liveUrl: null,
+      error: null,
+      createdAt: new Date(),
+      updatedAt: new Date(),
+    });
 
-        // Process in background
-        processPreview(previewId, prompt).catch(console.error);
+    await previewQueue.add({ jobId, prompt, userId: userId || 'anonymous' }, { jobId });
 
-        res.json({ 
-            success: true, 
-            previewId, 
-            message: 'Preview generation started' 
-        });
-    } catch (error) {
-        res.status(500).json({ 
-            success: false, 
-            error: 'Failed to start preview generation' 
-        });
-    }
+    console.log(`Job ${jobId} queued`);
+    res.json({ 
+      success: true, 
+      jobId, 
+      message: 'Preview queued',
+      checkStatus: `https://preview-engine-lovable.onrender.com/api/preview/${jobId}`
+    });
+  } catch (error) {
+    console.error('Queue error:', error);
+    res.status(500).json({ success: false, error: 'Failed to queue' });
+  }
 });
 
-// Check preview status
+// FIX: Check preview status
 app.get('/api/preview/:id', async (req, res) => {
+  try {
     const preview = await db.previews.get(req.params.id);
-    if (!preview) {
-        return res.status(404).json({ error: 'Preview not found' });
-    }
+    if (!preview) return res.status(404).json({ error: 'Not found' });
     res.json(preview);
+  } catch (error) {
+    res.status(500).json({ error: 'Database error' });
+  }
 });
-
-// Background processing function
-async function processPreview(previewId: string, prompt: string) {
-    try {
-        await db.previews.update(previewId, { 
-            status: 'generating',
-            updatedAt: new Date()
-        });
-
-        // Generate app code
-        const appPath = await generateAppCode(prompt);
-        
-        await db.previews.update(previewId, { 
-            status: 'deploying',
-            updatedAt: new Date()
-        });
-
-        // Deploy to Netlify
-        const liveUrl = await deployToNetlify(appPath, previewId);
-        
-        await db.previews.update(previewId, { 
-            status: 'live',
-            liveUrl,
-            updatedAt: new Date()
-        });
-    } catch (error) {
-        await db.previews.update(previewId, { 
-            status: 'failed',
-            error: error instanceof Error ? error.message : 'Unknown error',
-            updatedAt: new Date()
-        });
-    }
-}
 
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => {
-    console.log(`Preview Orchestrator API running on port ${PORT}`);
+  console.log(`Preview API running on port ${PORT}`);
+  console.log(`Redis: ${process.env.REDIS_URL ? 'CONNECTED' : 'MISSING'}`);
 });

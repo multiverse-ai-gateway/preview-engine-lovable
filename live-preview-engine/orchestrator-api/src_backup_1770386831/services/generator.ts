@@ -1,61 +1,11 @@
 import fs from 'fs-extra';
 import path from 'path';
-import { db } from '../db';
-import { deployToNetlify } from './netlify';
-
-export interface PreviewJobData {
-  jobId: string;
-  prompt: string;
-  userId: string;
-}
-
-export async function processPreviewJob(data: PreviewJobData): Promise<void> {
-  const { jobId, prompt, userId } = data;
-  let appPath = '';
-
-  try {
-    await db.previews.update(jobId, { 
-      status: 'building', 
-      updatedAt: new Date() 
-    });
-
-    appPath = await generateAppCode(prompt);
-    
-    await db.previews.update(jobId, { 
-      status: 'generating', 
-      updatedAt: new Date() 
-    });
-
-    const liveUrl = await deployToNetlify(appPath);
-    
-    if (!liveUrl) {
-      throw new Error('Failed to get deployment URL from Netlify');
-    }
-
-    await db.previews.update(jobId, { 
-      status: 'live', 
-      liveUrl,
-      updatedAt: new Date() 
-    });
-
-    await fs.remove(appPath).catch(() => {});
-  } catch (error) {
-    if (appPath) {
-      await fs.remove(appPath).catch(() => {});
-    }
-
-    await db.previews.update(jobId, { 
-      status: 'failed', 
-      error: error instanceof Error ? error.message : 'Unknown error',
-      updatedAt: new Date() 
-    });
-    throw error;
-  }
-}
 
 export async function generateAppCode(prompt: string): Promise<string> {
+    // Create a temporary directory for the app
     const tempDir = path.join('/tmp', `preview_${Date.now()}`);
     
+    // Basic React app template structure
     const template = {
         'package.json': JSON.stringify({
             name: `preview-app`,
@@ -123,9 +73,54 @@ ReactDOM.createRoot(document.getElementById('root')!).render(
     sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
-}`
+}`,
+        
+        'vite.config.ts': `import { defineConfig } from 'vite'
+import react from '@vitejs/plugin-react'
+
+export default defineConfig({
+  plugins: [react()],
+  server: {
+    port: 3000
+  }
+})`,
+        
+        'tsconfig.json': JSON.stringify({
+            compilerOptions: {
+                target: 'ES2020',
+                useDefineForClassFields: true,
+                lib: ['ES2020', 'DOM', 'DOM.Iterable'],
+                module: 'ESNext',
+                skipLibCheck: true,
+                moduleResolution: 'bundler',
+                allowImportingTsExtensions: true,
+                resolveJsonModule: true,
+                isolatedModules: true,
+                noEmit: true,
+                jsx: 'react-jsx',
+                strict: true,
+                noUnusedLocals: true,
+                noUnusedParameters: true,
+                noFallthroughCasesInSwitch: true
+            },
+            include: ['src'],
+            references: [{ path: './tsconfig.node.json' }]
+        }, null, 2),
+        
+        'tsconfig.node.json': JSON.stringify({
+            compilerOptions: {
+                composite: true,
+                skipLibCheck: true,
+                module: 'ESNext',
+                moduleResolution: 'bundler',
+                allowSyntheticDefaultImports: true,
+                strict: true
+            },
+            include: ['vite.config.ts']
+        }, null, 2)
     };
 
+    // Create directory structure and files
     await fs.ensureDir(tempDir);
     await fs.ensureDir(path.join(tempDir, 'src'));
     
